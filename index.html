@@ -410,25 +410,6 @@
         </div>
       </div>
 
-      <div class="export-bar" style="justify-content:flex-end; gap:.5rem; flex-wrap:wrap; margin-top:.5rem;">
-        <div class="export-actions" style="display:flex; gap:.5rem; flex-wrap:wrap;">
-          <button class="btn secondary" id="exportStateBtn" title="Exporte toute la saisie (stock, à acheter, cases, produits manuels)" type="button">Exporter la saisie (.json)</button>
-
-          <label class="btn secondary" style="cursor:pointer; display:inline-flex; align-items:center; gap:.35rem;">
-            Importer une saisie (.json)
-            <input type="file" id="importStateInput" accept="application/json" style="display:none;">
-          </label>
-
-          <label class="btn secondary" style="cursor:pointer; display:inline-flex; align-items:center; gap:.35rem;" title="Met à jour automatiquement la case BRASSEUR depuis la colonne J (BRASSEUR) du fichier ventes">
-            Importer ventes (.csv) → BRASSEUR auto
-            <input type="file" id="importSalesInput" accept=".csv,text/csv,application/vnd.ms-excel" style="display:none;">
-          </label>
-
-          <button class="btn secondary" id="resetStateBtn" title="Efface la sauvegarde locale sur cet appareil" type="button">Réinitialiser la saisie</button>
-        </div>
-      </div>
-
-
       <div class="lists-grid">
         <div class="list-box">
           <div class="export-bar">
@@ -453,7 +434,17 @@
         </div>
       </div>
 
-      <div class="hint" style="margin-top:.5rem;">Chaque ligne : libellé Coxx, quantité (unités), conditionnement.</div>
+      
+      <div class="export-bar" style="justify-content:flex-end; margin-top:.6rem;">
+        <div class="export-actions">
+          <button class="btn secondary" type="button" id="exportStateJsonBtn">Exporter la saisie (.json)</button>
+          <label class="btn secondary" style="cursor:pointer;">
+            Importer une saisie (.json)
+            <input type="file" id="importStateJsonInput" accept="application/json" style="display:none;">
+          </label>
+        </div>
+      </div>
+<div class="hint" style="margin-top:.5rem;">Chaque ligne : libellé Coxx, quantité (unités), conditionnement.</div>
     </div>
 
     </div>
@@ -471,233 +462,127 @@
   let state = {};
   let CUSTOM_ITEMS = [];
 
-  // ====== PERSISTENCE (LOCAL + EXPORT/IMPORT) ======
-  const STORAGE_KEY = "COXX_STOCK_APP_STATE_V1";
-  let _saveTimer = null;
+  // ===== Export / Import de la saisie (pour changer de poste / navigateur) =====
+  const STATE_EXPORT_VERSION = 1;
 
-  function scheduleSave() {
-    if (_saveTimer) clearTimeout(_saveTimer);
-    _saveTimer = setTimeout(saveToLocalStorage, 200);
+  function ensureStateDefaults() {
+    PRODUCTS.forEach(p => {
+      if (!state[p.idx]) {
+        state[p.idx] = {
+          countMode: (p.units_per_colis || 1) > 1 ? "colis" : "unite",
+          stockCount: 0,
+          orderUnitsOverride: null,
+          orderLotsOverride: null,
+          include: true,
+          brasseur: false,
+        };
+      }
+    });
   }
 
-  function buildPersistPayload() {
+  function buildSnapshot() {
+    const weekEl = document.getElementById("weekSelect");
+    const searchEl = document.getElementById("searchInput");
     return {
-      v: 1,
+      v: STATE_EXPORT_VERSION,
       savedAt: new Date().toISOString(),
-      week: document.getElementById("weekSelect")?.value || "1",
-      activeCategory: activeCategory || null,
-      search: document.getElementById("searchInput")?.value || "",
-      state,
+      week: weekEl ? weekEl.value : "1",
+      activeCategory: activeCategory,
+      search: searchEl ? searchEl.value : "",
+      state: state,
       customItems: CUSTOM_ITEMS
     };
   }
 
-  function saveToLocalStorage() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPersistPayload()));
-    } catch (e) {
-      console.warn("Sauvegarde locale impossible:", e);
-    }
-  }
-
-  function loadFromLocalStorage() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return false;
-      const payload = JSON.parse(raw);
-
-      if (payload && payload.state) state = payload.state;
-      if (payload && Array.isArray(payload.customItems)) CUSTOM_ITEMS = payload.customItems;
-
-      if (payload.week && document.getElementById("weekSelect")) {
-        document.getElementById("weekSelect").value = String(payload.week);
-      }
-      if (typeof payload.search === "string" && document.getElementById("searchInput")) {
-        document.getElementById("searchInput").value = payload.search;
-      }
-      if (payload.activeCategory) activeCategory = payload.activeCategory;
-
-      return true;
-    } catch (e) {
-      console.warn("Chargement local impossible:", e);
-      return false;
-    }
-  }
-
   function downloadJson(filename, obj) {
-    try {
-      const txt = JSON.stringify(obj, null, 2);
-      const blob = new Blob([txt], { type: "application/json;charset=utf-8" });
+    const jsonText = JSON.stringify(obj, null, 2);
+    const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
 
-      // IE/Edge legacy
-      if (window.navigator && window.navigator.msSaveOrOpenBlob) {
-        window.navigator.msSaveOrOpenBlob(blob, filename);
-        return;
-      }
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.target = "_blank";
-      a.rel = "noopener";
-      document.body.appendChild(a);
+    // Safari est parfois capricieux si le clic est immédiat
+    setTimeout(function () {
       a.click();
-      document.body.removeChild(a);
-
-      // délai utile pour Safari / file://
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
-    } catch (e) {
-      console.error("Export JSON impossible:", e);
-      alert("Export JSON impossible : " + (e?.message || e));
-    }
+      setTimeout(function () {
+        URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      }, 1000);
+    }, 50);
   }
 
-  function exportStateFile() {
+  function exportStateJson() {
     try {
-      downloadJson("COXX_saisie.json", buildPersistPayload());
+      downloadJson("COXX_saisie.json", buildSnapshot());
+      setStatus("Export JSON prêt (téléchargement lancé).");
     } catch (e) {
-      console.error("Export JSON impossible:", e);
-      alert("Export JSON impossible : " + (e?.message || e));
+      alert("Export impossible : " + (e && e.message ? e.message : e));
     }
   }
 
-  function importStateFile(file) {
+  function applySnapshot(payload) {
+    if (!payload || !payload.state) throw new Error("Fichier invalide : champ 'state' manquant");
+
+    state = payload.state;
+    CUSTOM_ITEMS = Array.isArray(payload.customItems) ? payload.customItems : [];
+
+    // remet semaine / filtre / onglet si fournis
+    const weekEl = document.getElementById("weekSelect");
+    if (weekEl && payload.week != null) weekEl.value = String(payload.week);
+
+    const searchEl = document.getElementById("searchInput");
+    if (searchEl && typeof payload.search === "string") searchEl.value = payload.search;
+
+    if (payload.activeCategory != null) activeCategory = payload.activeCategory;
+
+    // si la base produits a changé depuis l'export, on complète les nouveaux items
+    ensureStateDefaults();
+
+    buildCategoryTabs();
+    renderTable();
+    updatePanelSubtitle();
+    renderCustomItems();
+    setStatus("Saisie importée.");
+  }
+
+  function importStateJsonFile(file) {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = function () {
       try {
         const payload = JSON.parse(String(reader.result || "{}"));
-        if (!payload || !payload.state) throw new Error("Fichier invalide (state manquant)");
-
-        state = payload.state;
-        CUSTOM_ITEMS = Array.isArray(payload.customItems) ? payload.customItems : [];
-
-        if (payload.week && document.getElementById("weekSelect")) {
-          document.getElementById("weekSelect").value = String(payload.week);
-        }
-        if (typeof payload.search === "string" && document.getElementById("searchInput")) {
-          document.getElementById("searchInput").value = payload.search;
-        }
-        if (payload.activeCategory) activeCategory = payload.activeCategory;
-
-        saveToLocalStorage();
-        buildCategoryTabs();
-        renderTable();
-        updatePanelSubtitle();
-        renderCustomItems();
-        setStatus("Saisie importée");
+        applySnapshot(payload);
       } catch (e) {
-        alert("Import impossible : " + (e?.message || e));
+        alert("Import impossible : " + (e && e.message ? e.message : e));
       }
     };
     reader.readAsText(file);
   }
 
-  function resetSavedState() {
-    if (!confirm("Effacer la saisie sauvegardée sur cet appareil ?")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    location.reload();
-  }
-
-  // ====== IMPORT VENTES (CSV) -> BRASSEUR AUTO ======
-  function sniffDelimiter(line) {
-    const candidates = [",", ";", "\t"];
-    let best = { d: ",", n: -1 };
-    candidates.forEach(d => {
-      const n = line.split(d).length;
-      if (n > best.n) best = { d, n };
-    });
-    return best.d;
-  }
-
-  function cleanStr(s) {
-    return String(s ?? "").trim().replace(/^\uFEFF/, "");
-  }
-  function normKey(s) {
-    return cleanStr(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
-  }
-
-  function parseCsv(text) {
-    const lines = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(l => l.trim() !== "");
-    if (!lines.length) return { headers: [], rows: [] };
-    const delim = sniffDelimiter(lines[0]);
-    const headers = lines[0].split(delim).map(cleanStr);
-    const rows = lines.slice(1).map(line => {
-      const parts = line.split(delim);
-      const obj = {};
-      headers.forEach((h, i) => obj[h] = cleanStr(parts[i]));
-      return obj;
-    });
-    return { headers, rows };
-  }
-
-  function applyBrasseurFromSales(rows, headers) {
-    const hNorm = headers.map(h => normKey(h));
-    const idxOf = (names) => {
-      for (const n of names) {
-        const k = normKey(n);
-        const i = hNorm.indexOf(k);
-        if (i !== -1) return headers[i];
-      }
-      return null;
-    };
-
-    const colRef = idxOf(["code_article", "code article", "reference", "référence", "ref", "article", "code"]);
-    const colLib = idxOf(["libelle_coxx", "libellé coxx", "libelle", "libellé", "designation", "désignation", "composant", "produit"]);
-    const colBras = idxOf(["brasseur", "colonne j", "j"]);
-
-    if (!colBras) {
-      alert("Colonne BRASSEUR introuvable dans le fichier (attendu: 'BRASSEUR' en colonne J).");
-      return;
+  function initStateExportImportUI() {
+    const exportBtn = document.getElementById("exportStateJsonBtn");
+    if (exportBtn) {
+      exportBtn.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        exportStateJson();
+      });
     }
 
-    const byRef = new Map();
-    const byLib = new Map();
-
-    rows.forEach(r => {
-      const bras = ["o", "oui", "x", "1", "true"].includes(normKey(r[colBras]));
-      if (colRef && cleanStr(r[colRef])) byRef.set(cleanStr(r[colRef]), bras);
-      if (colLib && cleanStr(r[colLib])) byLib.set(normKey(r[colLib]), bras);
-    });
-
-    let hits = 0;
-    PRODUCTS.forEach(p => {
-      if (!state[p.idx]) return;
-      const st = state[p.idx];
-
-      const refKey = cleanStr(p.code_article);
-      const libKey = normKey(p.libelle);
-
-      let found = null;
-      if (refKey && byRef.has(refKey)) found = byRef.get(refKey);
-      else if (libKey && byLib.has(libKey)) found = byLib.get(libKey);
-
-      if (found !== null) {
-        st.brasseur = !!found;
-        state[p.idx] = st;
-        hits++;
-      }
-    });
-
-    scheduleSave();
-    renderTable();
-    renderLists();
-    setStatus(hits ? ("BRASSEUR mis à jour (" + hits + " produits)") : "Aucune correspondance BRASSEUR trouvée");
+    const importInput = document.getElementById("importStateJsonInput");
+    if (importInput) {
+      importInput.addEventListener("change", function (ev) {
+        const files = ev.target.files;
+        const file = files && files[0] ? files[0] : null;
+        if (file) importStateJsonFile(file);
+        // permet de réimporter le même fichier ensuite
+        ev.target.value = "";
+      });
+    }
   }
-
-  function importSalesFile(file) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const { headers, rows } = parseCsv(String(reader.result || ""));
-        applyBrasseurFromSales(rows, headers);
-      } catch (e) {
-        alert("Import ventes impossible : " + (e?.message || e));
-      }
-    };
-    reader.readAsText(file);
-  }
-
 
   function fmtNum(v, d = 2) {
     if (v == null || isNaN(v)) return "";
@@ -724,7 +609,6 @@
     weekSelect.value = "1";
     weekSelect.onchange = () => {
       renderTable();
-      scheduleSave();
       updatePanelSubtitle();
     };
   }
@@ -747,7 +631,6 @@
         btn.classList.add("active");
         renderTable();
         updatePanelSubtitle();
-        scheduleSave();
       });
       tabs.appendChild(btn);
     });
@@ -769,7 +652,6 @@
 
   document.getElementById("searchInput").addEventListener("input", () => {
     renderTable();
-    scheduleSave();
   });
 
   function renderTable() {
@@ -912,7 +794,6 @@
       selMode.addEventListener("change", () => {
         st.countMode = selMode.value;
         state[p.idx] = st;
-        scheduleSave();
         renderTable();
       });
       tdMode.appendChild(selMode);
@@ -932,7 +813,6 @@
         st.orderUnitsOverride = null;
         st.orderLotsOverride = null;
         state[p.idx] = st;
-        scheduleSave();
         renderTable();
       });
       stockDiv.appendChild(inputStock);
@@ -959,7 +839,6 @@
         st.orderLotsOverride = null;
         st.orderLotsOverride = null;
         state[p.idx] = st;
-        scheduleSave();
         renderTable();
       });
       const inputBuy = document.createElement("input");
@@ -972,7 +851,6 @@
         st.orderUnitsOverride = Math.max(0, Number(inputBuy.value) || 0);
         st.orderLotsOverride = null;
         state[p.idx] = st;
-        scheduleSave();
         renderTable();
       });
       const btnPlus = document.createElement("button");
@@ -984,7 +862,6 @@
         st.orderLotsOverride = null;
         st.orderLotsOverride = null;
         state[p.idx] = st;
-        scheduleSave();
         renderTable();
       });
       buyDiv.appendChild(btnMinus);
@@ -1017,8 +894,7 @@
           st.orderLotsOverride = next;
           st.orderUnitsOverride = next * packSize;
           state[p.idx] = st;
-          scheduleSave();
-        renderTable();
+          renderTable();
         });
 
         lotInput.addEventListener("change", () => {
@@ -1026,8 +902,7 @@
           st.orderLotsOverride = next;
           st.orderUnitsOverride = next * packSize;
           state[p.idx] = st;
-          scheduleSave();
-        renderTable();
+          renderTable();
         });
 
         const lotPlus = document.createElement("button");
@@ -1039,8 +914,7 @@
           st.orderLotsOverride = next;
           st.orderUnitsOverride = next * packSize;
           state[p.idx] = st;
-          scheduleSave();
-        renderTable();
+          renderTable();
         });
 
         lotDiv.appendChild(lotMinus);
@@ -1350,54 +1224,19 @@ document.getElementById("addCustomBtn").addEventListener("click", () => {
   });
 
   window.addEventListener("load", () => {
-    // 1) Initialise l'état par défaut (au cas où la base change)
-    PRODUCTS.forEach(p => {
-      if (!state[p.idx]) {
-        state[p.idx] = {
-          countMode: (p.units_per_colis || 1) > 1 ? "colis" : "unite",
-          stockCount: 0,
-          orderUnitsOverride: null,
-          orderLotsOverride: null,
-          include: true,
-          brasseur: false,
-        };
-      }
-    });
+    // Initialise les valeurs par défaut (sans écraser une saisie importée ensuite)
+    ensureStateDefaults();
 
     buildWeekOptions();
-
-    // 2) Restaure la saisie sauvegardée si elle existe
-    const restored = loadFromLocalStorage();
-
     buildCategoryTabs();
     renderTable();
     updatePanelSubtitle();
     renderCustomItems();
-    setStatus(restored ? "Saisie restaurée" : "Prêt à l'utilisation");
 
-    // 3) Boutons Export / Import / Reset
-    document.getElementById("exportStateBtn")?.addEventListener("click", exportStateFile);
+    initStateExportImportUI();
 
-    const importInput = document.getElementById("importStateInput");
-    if (importInput) {
-      importInput.addEventListener("change", (e) => {
-        const f = e.target.files && e.target.files[0];
-        if (f) importStateFile(f);
-        importInput.value = "";
-      });
-    }
-
-    const salesInput = document.getElementById("importSalesInput");
-    if (salesInput) {
-      salesInput.addEventListener("change", (e) => {
-        const f = e.target.files && e.target.files[0];
-        if (f) importSalesFile(f);
-        salesInput.value = "";
-      });
-    }
-
-    document.getElementById("resetStateBtn")?.addEventListener("click", resetSavedState);
-});
+    setStatus("Prêt à l'utilisation");
+  });
 </script>
 
 
