@@ -601,17 +601,56 @@
     }
   }
 
-  function downloadJson(filename, obj) {
+    function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+function downloadJson(filename, obj) {
     const txt = JSON.stringify(obj, null, 2);
     const blob = new Blob([txt], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+
+    // iOS/Safari can ignore a.download for blob URLs.
+    const ua = navigator.userAgent || "";
+    const isIOS = /iP(ad|hone|od)/.test(ua);
+    const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
+
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
+      a.style.display = "none";
+      document.body.appendChild(a);
+
+      // Try the standard way first.
+      a.click();
+      document.body.removeChild(a);
+
+      // Fallback for Safari/iOS: open the blob in a new tab/window
+      // so the user can "Partager" / "Enregistrer dans Fichiers".
+      if ((isIOS || isSafari) && !("download" in HTMLAnchorElement.prototype)) {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    } catch (e) {
+      // Last resort: open the JSON in a new tab for manual copy/save.
+      const w = window.open("", "_blank", "noopener,noreferrer");
+      if (w) {
+        w.document.write("<pre style='white-space:pre-wrap;word-break:break-word;margin:16px;font:14px/1.4 system-ui;'>" +
+          escapeHtml(txt) + "</pre>");
+        w.document.title = filename;
+      } else {
+        alert("Impossible d'ouvrir l'export (popup bloquée). Autorise les popups ou réessaie sur ordinateur.");
+      }
+    } finally {
+      // Give Safari a moment before revoking, otherwise it may open a blank tab.
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch(e){} }, 1500);
+    }
   }
 
   function resetSession({ keepWeek = true } = {}) {
