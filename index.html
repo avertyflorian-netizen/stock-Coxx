@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>MAJ COXX – Import besoins (ZIP) → Profil hebdo</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;max-width:980px}
+  h1{margin:0 0 12px 0;font-size:22px}
+  .row{display:flex;gap:16px;flex-wrap:wrap;margin:12px 0}
+  .card{border:1px solid #ddd;border-radius:12px;padding:14px;flex:1;min-width:280px}
+  label{display:block;font-weight:600;margin-bottom:6px}
+  input,select,button{font-size:14px}
+  input[type=file]{width:100%}
+  button{padding:10px 14px;border-radius:10px;border:1px solid #222;background:#111;color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .muted{color:#666;font-size:13px}
+  .ok{color:#0a7a2f}
+  .err{color:#b00020}
+  pre{background:#0b0b0b;color:#eaeaea;padding:12px;border-radius:12px;overflow:auto;max-height:340px}
+  .pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#f3f3f3;margin-left:8px;font-size:12px}
+</style>
+</head>
+<body>
+  <h1>MAJ – Besoins COXX (litres) → Profil hebdo (unités/semaine)</h1>
+  <p class="muted">Charge ton <b>HTML stock</b> puis un <b>ZIP</b> contenant <code>BESOINS 01 JANVIER.csv</code>…<code>BESOINS 12 DECEMBRE.csv</code> + <code>BESOINS ANNEE.csv</code>. L’outil met à jour uniquement <b>Soft</b> et <b>Alcool</b>.</p>
+
+  <div class="row">
+    <div class="card">
+      <label>1) HTML de base (outil stock)</label>
+      <input id="baseHtml" type="file" accept=".html,text/html"/>
+      <div id="baseHtmlStatus" class="muted">Aucun fichier chargé</div>
+    </div>
+
+    <div class="card">
+      <label>2) ZIP Besoins (12 mois + année)</label>
+      <input id="zipNeeds" type="file" accept=".zip,application/zip"/>
+      <div id="zipStatus" class="muted">Aucun fichier chargé</div>
+    </div>
+
+    <div class="card">
+      <label>Année de projection (ISO)</label>
+      <select id="yearSel">
+        <option value="2026" selected>2026 (53 semaines)</option>
+        <option value="2025">2025 (52 semaines)</option>
+        <option value="2027">2027 (52 semaines)</option>
+      </select>
+      <p class="muted">Le profil hebdo est calculé au prorata des jours par semaine ISO.</p>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="runBtn" disabled>Générer le HTML mis à jour</button>
+    <span id="runStatus" class="pill">Prêt</span>
+  </div>
+
+  <div class="card">
+    <label>Logs</label>
+    <pre id="log"></pre>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+const $ = (id)=>document.getElementById(id);
+const logEl = $("log");
+function log(...args){ logEl.textContent += args.join(" ") + "\n"; }
+function setStatus(el, txt, cls){
+  el.textContent = txt;
+  el.className = cls || "muted";
+}
+function normalizeKey(s){
+  return (s||"").toString().trim().toLowerCase().replace(/\s+/g," ");
+}
+function parseFrNumber(v){
+  if(v==null) return 0;
+  const s = (""+v).trim().replace(/\s+/g,"").replace(",",".");
+  const m = s.match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : 0;
+}
+function parseVolumeL(fmt){
+  if(!fmt) return null;
+  let s = (""+fmt).trim().toLowerCase().replace(/\s+/g,"").replace(",",".");
+  let m = s.match(/(\d+(?:\.\d+)?)(l|cl|ml)\b/);
+  if(!m) return null;
+  const val = parseFloat(m[1]);
+  const unit = m[2];
+  if(unit==="l") return val;
+  if(unit==="cl") return val/100;
+  if(unit==="ml") return val/1000;
+  return null;
+}
+function daysInMonth(year, month){ // month:1-12
+  return new Date(year, month, 0).getDate();
+}
+function isoWeekNumber(date){
+  // https://en.wikipedia.org/wiki/ISO_week_date#Algorithms
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+function isoWeeksInYear(year){
+  // ISO week of Dec 28 defines last ISO week of the year
+  return isoWeekNumber(new Date(Date.UTC(year, 11, 28)));
+}
+function parseCsv(text){
+  // CSV simple avec séparateur ';' attendu
+  // Support minimal des guillemets.
+  const lines = text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim()!=="");
+  if(!lines.length) return [];
+  const sep = lines[0].includes(";") ? ";" : (lines[0].includes("\t") ? "\t" : ",");
+  const rows = [];
+  const headers = splitCsvLine(lines[0], sep).map(h=>h.trim());
+  for(let i=1;i<lines.length;i++){
+    const cols = splitCsvLine(lines[i], sep);
+    const row = {};
+    headers.forEach((h,idx)=> row[h] = (cols[idx]??"").trim());
+    rows.push(row);
+  }
+  return rows;
+
+  function splitCsvLine(line, sep){
+    const out=[]; let cur=""; let inQ=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(ch==='"'){ 
+        if(inQ && line[i+1]==='"'){ cur+='"'; i++; }
+        else inQ=!inQ;
+      } else if(ch===sep && !inQ){
+        out.push(cur); cur="";
+      } else cur+=ch;
+    }
+    out.push(cur);
+    return out;
+  }
+}
+
+let baseHtmlText = null;
+let zipFile = null;
+
+$("baseHtml").addEventListener("change", async (e)=>{
+  const f = e.target.files && e.target.files[0];
+  if(!f){ setStatus($("baseHtmlStatus"), "Aucun fichier chargé", "muted"); baseHtmlText=null; updateBtn(); return; }
+  setStatus($("baseHtmlStatus"), `Sélectionné: ${f.name} (${Math.round(f.size/1024)} Ko)`, "ok");
+  baseHtmlText = await f.text();
+  updateBtn();
+});
+
+$("zipNeeds").addEventListener("change", async (e)=>{
+  const f = e.target.files && e.target.files[0];
+  if(!f){ setStatus($("zipStatus"), "Aucun fichier chargé", "muted"); zipFile=null; updateBtn(); return; }
+  setStatus($("zipStatus"), `Sélectionné: ${f.name} (${Math.round(f.size/1024)} Ko)`, "ok");
+  zipFile = f;
+  updateBtn();
+});
+
+function updateBtn(){
+  $("runBtn").disabled = !(baseHtmlText && zipFile);
+}
+
+function extractEmbeddedData(html){
+  const m = html.match(/const\s+EMBEDDED_DATA\s*=\s*({[\s\S]*?});/);
+  if(!m) throw new Error("Impossible de trouver const EMBEDDED_DATA = {...}; dans le HTML.");
+  const objText = m[1];
+  // Parse objet JS (pas JSON strict) → Function
+  let data;
+  try{
+    data = (new Function("return ("+objText+");"))();
+  }catch(err){
+    // fallback: tenter de nettoyer virgules finales
+    const cleaned = objText.replace(/,\s*([}\]])/g,"$1");
+    data = (new Function("return ("+cleaned+");"))();
+  }
+  return {data, objText};
+}
+
+function downloadText(filename, text){
+  const blob = new Blob([text], {type:"text/html;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+}
+
+$("runBtn").addEventListener("click", async ()=>{
+  logEl.textContent="";
+  $("runStatus").textContent="Traitement…";
+  try{
+    const year = parseInt($("yearSel").value,10);
+    const weeksInYear = isoWeeksInYear(year);
+    log("Année:", year, "| Semaines ISO:", weeksInYear);
+
+    const {data:embedded, objText} = extractEmbeddedData(baseHtmlText);
+    if(!embedded || !embedded.products || !embedded.hebdo) throw new Error("EMBEDDED_DATA incomplet (products/hebdo manquant).");
+    log("Produits:", embedded.products.length, "| Hebdo:", Object.keys(embedded.hebdo).length);
+
+    // index produits par libellé
+    const byLabel = new Map();
+    const byCode = new Map();
+    let maxIdx = 0;
+    let maxCode = 0;
+    for(const p of embedded.products){
+      maxIdx = Math.max(maxIdx, p.idx||0);
+      if(p.code_article!=null && !isNaN(p.code_article)) maxCode = Math.max(maxCode, Number(p.code_article));
+      if(p.libelle) byLabel.set(normalizeKey(p.libelle), p);
+      if(p.code_article!=null) byCode.set(String(p.code_article), p);
+    }
+
+    const zip = await JSZip.loadAsync(zipFile);
+
+    function cleanZipNames(){
+      return Object.keys(zip.files).filter(n=>!n.startsWith("__MACOSX/") && !n.endsWith("/"));
+    }
+    const zNames = cleanZipNames();
+    const annualName = zNames.find(n=>/besoins\s+annee\.csv$/i.test(n));
+    if(!annualName) throw new Error("ZIP: fichier annuel introuvable (attendu: BESOINS ANNEE.csv).");
+
+    const monthNames = {};
+    const monthMap = [
+      [1, "JANVIER"], [2,"FEVRIER"], [3,"MARS"], [4,"AVRIL"], [5,"MAI"], [6,"JUIN"],
+      [7,"JUILLET"], [8,"AOUT"], [9,"SEPTEMBRE"], [10,"OCTOBRE"], [11,"NOVEMBRE"], [12,"DECEMBRE"]
+    ];
+    for(const [m, lab] of monthMap){
+      const re = new RegExp(`besoins\\s+0?${m}\\s+${lab}\\.csv$`, "i");
+      const found = zNames.find(n=>re.test(n));
+      if(found) monthNames[m]=found;
+    }
+    const missingMonths = monthMap.filter(([m])=>!monthNames[m]).map(([m,lab])=>lab);
+    if(missingMonths.length) log("⚠️ Mois manquants dans le ZIP:", missingMonths.join(", "));
+
+    // Lire annuel
+    const annualText = await zip.file(annualName).async("string");
+    const annualRows = parseCsv(annualText);
+
+    // détecter colonnes
+    const colVol = (annualRows[0] && Object.keys(annualRows[0]).find(c=>c.toLowerCase().includes("volume"))) || "Volume (L)";
+    const colCat = (annualRows[0] && Object.keys(annualRows[0]).find(c=>c.toLowerCase()==="categorie")) || "categorie";
+    const colLabel = (annualRows[0] && (Object.keys(annualRows[0]).find(c=>c.toLowerCase()==="libelle_coxx") || Object.keys(annualRows[0]).find(c=>c.toLowerCase()==="composant"))) || "libelle_coxx";
+    const colFmt = (annualRows[0] && Object.keys(annualRows[0]).find(c=>c.toLowerCase()==="format")) || "Format";
+
+    function isImpacted(row){
+      const cat = normalizeKey(row[colCat]);
+      return cat==="alcool" || cat==="soft";
+    }
+    const annualByLabel = new Map();
+    const metaByLabel = new Map();
+    for(const r of annualRows){
+      if(!isImpacted(r)) continue;
+      const label = (r["libelle_coxx"]||r["Composant"]||r[colLabel]||"").toString().trim();
+      if(!label) continue;
+      const liters = parseFrNumber(r[colVol]);
+      annualByLabel.set(label, liters);
+      if(!metaByLabel.has(label)){
+        metaByLabel.set(label, {
+          categorie: (r[colCat]||"").toString().trim(),
+          format: (r[colFmt]||"").toString().trim(),
+          units_per_colis: r["conditionnement_unites_par_colis"],
+          cond_unitaire: r["Type de conditionnement unitaire"],
+          cond_lot: r["Nom conditionnement vendu en lot"],
+          decond: r["Décondionnement unitaire possible"],
+        });
+      }
+    }
+    log("Lignes annuel (Soft+Alcool):", annualByLabel.size);
+
+    // Mensuels -> cumul mois + profil jour→semaine
+    const monthlyTotals = new Map(); // label -> sum liters
+    const weeklyLiters = new Map();  // label -> Map(week->liters)
+    function addWeekly(label, week, liters){
+      if(!weeklyLiters.has(label)) weeklyLiters.set(label, new Map());
+      const m = weeklyLiters.get(label);
+      m.set(week, (m.get(week)||0) + liters);
+    }
+    for(const [m, name] of Object.entries(monthNames)){
+      const month = parseInt(m,10);
+      const txt = await zip.file(name).async("string");
+      const rows = parseCsv(txt);
+      if(!rows.length) continue;
+      const colVolM = Object.keys(rows[0]).find(c=>c.toLowerCase().includes("volume")) || colVol;
+      const colCatM = Object.keys(rows[0]).find(c=>c.toLowerCase()==="categorie") || colCat;
+      for(const r of rows){
+        const cat = normalizeKey(r[colCatM]);
+        if(!(cat==="alcool" || cat==="soft")) continue;
+        const label = (r["libelle_coxx"]||r["Composant"]||"").toString().trim();
+        if(!label) continue;
+        const litersMonth = parseFrNumber(r[colVolM]);
+        monthlyTotals.set(label, (monthlyTotals.get(label)||0) + litersMonth);
+
+        // meta si absent (utile pour ajout)
+        if(!metaByLabel.has(label)){
+          metaByLabel.set(label, {
+            categorie: (r[colCatM]||"").toString().trim(),
+            format: (r["Format"]||"").toString().trim(),
+            units_per_colis: r["conditionnement_unites_par_colis"],
+            cond_unitaire: r["Type de conditionnement unitaire"],
+            cond_lot: r["Nom conditionnement vendu en lot"],
+            decond: r["Décondionnement unitaire possible"],
+          });
+        }
+
+        const dim = daysInMonth(year, month);
+        const daily = dim ? litersMonth/dim : 0;
+        for(let d=1; d<=dim; d++){
+          const dt = new Date(Date.UTC(year, month-1, d));
+          const w = isoWeekNumber(dt);
+          addWeekly(label, w, daily);
+        }
+      }
+      log("OK mois", month, ":", name);
+    }
+
+    // Reconciliation annuel : scale profil mensuel pour matcher l'annuel
+    const weeklyScaled = new Map(); // label -> Map(week->liters)
+    for(const [label, annLiters] of annualByLabel.entries()){
+      const mSum = monthlyTotals.get(label) || 0;
+      if(mSum>0){
+        const scale = annLiters / mSum;
+        const wk = weeklyLiters.get(label) || new Map();
+        const out = new Map();
+        for(const [w,v] of wk.entries()) out.set(w, v*scale);
+        weeklyScaled.set(label, out);
+      } else {
+        // pas de mensuel → uniforme
+        const out = new Map();
+        const perWeek = annLiters / weeksInYear;
+        for(let w=1; w<=weeksInYear; w++) out.set(w, perWeek);
+        weeklyScaled.set(label, out);
+      }
+    }
+
+    // helper: ensure product exists (and has code)
+    function ensureProduct(label){
+      const k = normalizeKey(label);
+      let p = byLabel.get(k);
+      if(p) return p;
+      const meta = metaByLabel.get(label) || {};
+      maxIdx += 1; maxCode += 1;
+      p = {
+        idx: maxIdx,
+        libelle: label,
+        categorie: meta.categorie || "Soft",
+        format_lib: meta.format || "",
+        units_per_colis: parseInt((meta.units_per_colis||"1").toString().match(/\d+/)?.[0]||"1",10),
+        code_article: maxCode,
+        cond_unitaire_lib: meta.cond_unitaire || "",
+        cond_lot_lib: meta.cond_lot || "",
+        decond_possible: meta.decond || "Oui",
+        prix_vente_ttc: null, tva_pct: null, prix_vente_ht: null, prix_achat_ht_unite: null, marge_euro: null, marge_pct: null
+      };
+      embedded.products.push(p);
+      byLabel.set(k,p);
+      byCode.set(String(p.code_article),p);
+      return p;
+    }
+
+    // Mise à jour hebdo (unités/semaine) uniquement Soft + Alcool
+    let updatedCount = 0;
+    let skippedNoFormat = 0;
+    for(const [label, wkLiters] of weeklyScaled.entries()){
+      const p = ensureProduct(label);
+      const cat = normalizeKey(p.categorie);
+      if(!(cat==="alcool" || cat==="soft")) continue;
+
+      const volUnit = parseVolumeL(p.format_lib) || parseVolumeL((metaByLabel.get(label)||{}).format);
+      if(!volUnit || !(volUnit>0)){
+        skippedNoFormat++;
+        continue;
+      }
+      const out = {};
+      for(let w=1; w<=weeksInYear; w++){
+        const liters = wkLiters.get(w) || 0;
+        out[String(w)] = liters / volUnit; // unités
+      }
+      embedded.hebdo[String(p.code_article)] = out;
+      updatedCount++;
+    }
+
+    log("Maj hebdo:", updatedCount, "| Ignorés (format invalide):", skippedNoFormat);
+
+    // Remplacer EMBEDDED_DATA dans le HTML par un JSON propre (valide JS)
+    const newEmbeddedText = JSON.stringify(embedded);
+    const newHtml = baseHtmlText.replace(objText, newEmbeddedText);
+
+    const outName = `STOCK_COXX_MAJ_BESOINS_${year}.html`;
+    downloadText(outName, newHtml);
+    $("runStatus").textContent="Terminé ✅";
+  }catch(e){
+    console.error(e);
+    log("❌ Erreur:", e && e.message ? e.message : e);
+    $("runStatus").textContent="Erreur ❌";
+  }
+});
+</script>
+</body>
+</html>
