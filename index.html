@@ -601,56 +601,17 @@
     }
   }
 
-    function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-function downloadJson(filename, obj) {
+  function downloadJson(filename, obj) {
     const txt = JSON.stringify(obj, null, 2);
     const blob = new Blob([txt], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-
-    // iOS/Safari can ignore a.download for blob URLs.
-    const ua = navigator.userAgent || "";
-    const isIOS = /iP(ad|hone|od)/.test(ua);
-    const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
-
-    try {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.rel = "noopener";
-      a.style.display = "none";
-      document.body.appendChild(a);
-
-      // Try the standard way first.
-      a.click();
-      document.body.removeChild(a);
-
-      // Fallback for Safari/iOS: open the blob in a new tab/window
-      // so the user can "Partager" / "Enregistrer dans Fichiers".
-      if ((isIOS || isSafari) && !("download" in HTMLAnchorElement.prototype)) {
-        window.open(url, "_blank", "noopener,noreferrer");
-      }
-    } catch (e) {
-      // Last resort: open the JSON in a new tab for manual copy/save.
-      const w = window.open("", "_blank", "noopener,noreferrer");
-      if (w) {
-        w.document.write("<pre style='white-space:pre-wrap;word-break:break-word;margin:16px;font:14px/1.4 system-ui;'>" +
-          escapeHtml(txt) + "</pre>");
-        w.document.title = filename;
-      } else {
-        alert("Impossible d'ouvrir l'export (popup bloquée). Autorise les popups ou réessaie sur ordinateur.");
-      }
-    } finally {
-      // Give Safari a moment before revoking, otherwise it may open a blank tab.
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch(e){} }, 1500);
-    }
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   function resetSession({ keepWeek = true } = {}) {
@@ -1328,78 +1289,236 @@ document.getElementById("addCustomBtn").addEventListener("click", () => {
   });
 
   window.addEventListener("load", () => {
-    // Init "vide"
-    state = {};
-    PRODUCTS.forEach(p => { state[p.idx] = defaultStateForProduct(p); });
-    CUSTOM_ITEMS = [];
-
+    PRODUCTS.forEach(p => {
+      state[p.idx] = {
+        countMode: (p.units_per_colis || 1) > 1 ? "colis" : "unite",
+        stockCount: 0,
+        orderUnitsOverride: null,
+          orderLotsOverride: null,
+        include: true,
+        brasseur: false,
+      };
+    });
     buildWeekOptions();
     buildCategoryTabs();
-
-    // Reprise auto si une sauvegarde existe (localStorage)
-    tryLoadSessionFromLocalStorage();
-
     renderTable();
     updatePanelSubtitle();
     renderCustomItems();
-    try { refreshListsUI(); } catch (e) {}
+    setStatus("Prêt à l'utilisation");
 
-    // Boutons export / import / reset
-    document.getElementById("exportSessionBtn")?.addEventListener("click", () => {
-      const payload = buildSessionPayload();
-      const safeWeek = payload.week || 1;
-      downloadJson(`COXX_saisie_semaine_${safeWeek}.json`, payload);
-      setSessionStatus(`Exporté (semaine ${safeWeek}).`);
-      safeSetStatus("Exporté");
-    });
+    // --- Boutons Export/Import Saisie (CSV) ---
+    const exportBtn = document.getElementById("exportSessionCsvBtn");
+    const importBtn = document.getElementById("importSessionCsvBtn");
+    const resetBtn  = document.getElementById("resetSessionBtn");
+    const fileInput = document.getElementById("sessionCsvFileInput");
 
-    document.getElementById("importSessionInput")?.addEventListener("change", (ev) => {
-      const file = ev.target.files && ev.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const payload = JSON.parse(String(reader.result || ""));
-          applySessionPayload(payload);
-          // On persiste aussi pour la reprise auto
-          try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(buildSessionPayload())); } catch (e) {}
-        } catch (e) {
-          setSessionStatus(`Erreur import : ${e.message || e}`);
-          safeSetStatus("Erreur import");
-        } finally {
-          ev.target.value = "";
-        }
-      };
-      reader.readAsText(file, "utf-8");
-    });
+    if (exportBtn) {
+      exportBtn.addEventListener("click", () => {
+        const csv = buildSessionCsv();
+        const week = (document.getElementById("weekSelect")?.value || "").replace(/[^\w-]+/g,"_");
+        downloadText(`saisie_${week || "session"}.csv`, csv);
+      });
+    }
 
-    document.getElementById("clearSessionBtn")?.addEventListener("click", () => {
-      resetSession({ keepWeek: true });
-    });
+    if (importBtn && fileInput) {
+      importBtn.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", async (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (!f) return;
+        const text = await f.text();
+        applySessionFromCsv(text);
+        fileInput.value = "";
+      });
+    }
 
-    // Marque la saisie comme "modifiée" -> autosauvegarde locale
-    document.addEventListener("change", (e) => {
-      const t = e.target;
-      if (!t) return;
-      if (t.id === "importSessionInput") return;
-      // Toute modification utilisateur sur les champs
-      if (t.matches("input, select, textarea")) markDirty();
-    }, true);
-
-    document.addEventListener("click", (e) => {
-      const t = e.target;
-      if (!t) return;
-      if (t.classList && t.classList.contains("stepper-btn")) markDirty();
-      if (t.id === "addCustomBtn") markDirty();
-    }, true);
-
-    safeSetStatus("Prêt");
-    setSessionStatus("Prêt. Pense à exporter la saisie si tu veux la transférer sur un autre PC.");
+    if (resetBtn) {
+      resetBtn.addEventListener("click", () => {
+        state = {};
+        CUSTOM_ITEMS = [];
+        buildCategoryTabs();
+        renderTable();
+        updatePanelSubtitle();
+        renderCustomItems();
+        refreshListsUI();
+        setStatus("Saisie réinitialisée");
+      });
+    }
   });
 </script>
 
 
 <script>
+
+
+  // =========================
+  // Sauvegarde / Reprise CSV
+  // =========================
+  function csvEscape(v) {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    if (/[;"\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function downloadText(filename, text) {
+    // Téléchargement robuste (navigateur moderne) + fallback iOS/Safari
+    try {
+      const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      // fallback: ouvre dans un nouvel onglet
+      const win = window.open();
+      if (win) {
+        win.document.write("<pre>" + (text || "").replace(/</g,"&lt;") + "</pre>");
+        win.document.title = filename;
+      }
+    }
+  }
+
+  function buildSessionCsv() {
+    const rows = [];
+    rows.push(["type","key","value"]);
+    const weekSelect = document.getElementById("weekSelect");
+    const searchInput = document.getElementById("searchInput");
+    rows.push(["meta","week", weekSelect ? weekSelect.value : ""]);
+    rows.push(["meta","activeCategory", activeCategory || ""]);
+    rows.push(["meta","search", searchInput ? searchInput.value : ""]);
+    rows.push(["meta","savedAt", new Date().toISOString()]);
+
+    rows.push(["type","idx","countMode","stockCount","orderUnitsOverride","orderLotsOverride","include","brasseur"]);
+    Object.keys(state || {}).forEach(k => {
+      const st = state[k] || {};
+      rows.push([
+        "product",
+        k,
+        st.countMode ?? "",
+        st.stockCount ?? "",
+        st.orderUnitsOverride ?? "",
+        st.orderLotsOverride ?? "",
+        st.include === false ? 0 : 1,
+        st.brasseur ? 1 : 0
+      ]);
+    });
+
+    rows.push(["type","id","libelle","quantite","conditionnement","categorie"]);
+    (CUSTOM_ITEMS || []).forEach(it => {
+      rows.push([
+        "custom",
+        it.id ?? "",
+        it.libelle ?? "",
+        it.quantite ?? "",
+        it.conditionnement ?? "",
+        it.categorie ?? ""
+      ]);
+    });
+
+    return rows.map(r => r.map(csvEscape).join(";")).join("\n");
+  }
+
+  function parseCsvLines(text) {
+    // Parse CSV séparateur ; avec guillemets "..."
+    const lines = (text || "").split(/\r?\n/).filter(l => l.trim().length);
+    const out = [];
+    for (const line of lines) {
+      const row = [];
+      let cur = "";
+      let inQ = false;
+      for (let i=0;i<line.length;i++){
+        const ch = line[i];
+        if (inQ) {
+          if (ch === '"') {
+            if (line[i+1] === '"') { cur += '"'; i++; }
+            else inQ = false;
+          } else cur += ch;
+        } else {
+          if (ch === '"') inQ = true;
+          else if (ch === ';') { row.push(cur); cur=""; }
+          else cur += ch;
+        }
+      }
+      row.push(cur);
+      out.push(row);
+    }
+    return out;
+  }
+
+  function applySessionFromCsv(text) {
+    const rows = parseCsvLines(text);
+    if (!rows.length) return;
+
+    let section = "meta";
+    const newState = {};
+    const newCustom = [];
+    let meta = {};
+
+    for (const r of rows) {
+      if (!r.length) continue;
+      const t = (r[0] || "").trim();
+
+      if (t === "type" && (r[1] || "").trim() === "idx") { section = "products"; continue; }
+      if (t === "type" && (r[1] || "").trim() === "id") { section = "custom"; continue; }
+
+      if (t === "meta") {
+        meta[(r[1] || "").trim()] = r[2] ?? "";
+        continue;
+      }
+
+      if (t === "product" && section === "products") {
+        const idx = (r[1] || "").trim();
+        if (!idx) continue;
+        newState[idx] = {
+          countMode: r[2] || "unite",
+          stockCount: Number(r[3] || 0) || 0,
+          orderUnitsOverride: (r[4] === "" ? null : Number(r[4])),
+          orderLotsOverride: (r[5] === "" ? null : Number(r[5])),
+          include: (String(r[6] || "1") === "0") ? false : true,
+          brasseur: (String(r[7] || "0") === "1"),
+        };
+        continue;
+      }
+
+      if (t === "custom" && section === "custom") {
+        const id = r[1] || (Date.now() + Math.random());
+        const libelle = (r[2] || "").trim();
+        const quantite = Number(r[3] || 0) || 0;
+        if (!libelle || quantite <= 0) continue;
+        newCustom.push({
+          id,
+          libelle,
+          quantite,
+          conditionnement: (r[4] || ""),
+          categorie: (r[5] || "")
+        });
+      }
+    }
+
+    // Appliquer meta
+    const weekSelect = document.getElementById("weekSelect");
+    const searchInput = document.getElementById("searchInput");
+    if (weekSelect && meta.week) weekSelect.value = meta.week;
+    if (searchInput) searchInput.value = meta.search || "";
+    activeCategory = meta.activeCategory || activeCategory;
+
+    // Appliquer state + custom
+    state = newState;
+    CUSTOM_ITEMS = newCustom;
+
+    // Reconstruire UI
+    buildCategoryTabs();
+    renderTable();
+    updatePanelSubtitle();
+    renderCustomItems();
+    refreshListsUI();
+    setStatus("Saisie importée ✅");
+  }
+
 document.addEventListener("change", function(e){
   const tbody = document.querySelector("#productTable tbody");
   if(!tbody) return;
