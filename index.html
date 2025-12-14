@@ -506,16 +506,30 @@
     a.style.display = "none";
     document.body.appendChild(a);
 
-    // Safari est parfois capricieux si le clic est immédiat
-    setTimeout(function () {
-      a.click();
-      setTimeout(function () {
-        URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-      }, 1000);
-    }, 50);
-  }
+    const ua = String(navigator.userAgent || "");
+    const isSafari = /safari/i.test(ua) && !/chrome|crios|android/i.test(ua);
 
+    // 1) Tentative download standard
+    try { a.click(); } catch (e) {}
+
+    // 2) Fallback Safari: ouvrir le JSON dans un nouvel onglet (l'utilisateur peut ensuite "Enregistrer sous…")
+    if (isSafari) {
+      setTimeout(function () {
+        try {
+          const w = window.open(url, "_blank");
+          if (!w) { window.location.href = url; }
+        } catch (e) {
+          window.location.href = url;
+        }
+      }, 150);
+    }
+
+    // Nettoyage (on laisse le temps à Safari d'ouvrir l'onglet)
+    setTimeout(function () {
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      try { document.body.removeChild(a); } catch (e) {}
+    }, 60000);
+  }
   function exportStateJson() {
     try {
       downloadJson("COXX_saisie.json", buildSnapshot());
