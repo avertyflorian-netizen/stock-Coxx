@@ -338,6 +338,19 @@
     </div>
   </section>
 
+  <section class="file-bar" aria-label="Sauvegarde et reprise">
+    <div class="file-info">
+      <strong>Saisie</strong>
+      <div id="sessionStatus">Aucune sauvegarde chargée.</div>
+    </div>
+    <span class="badge" id="statusBadge">Prêt</span>
+    <button class="btn" id="exportSessionBtn">Exporter la saisie (.json)</button>
+    <label class="btn secondary" for="importSessionInput" style="cursor:pointer;">Importer une saisie (.json)</label>
+    <input type="file" id="importSessionInput" accept="application/json" style="display:none" />
+    <button class="btn secondary" id="clearSessionBtn" title="Remet à zéro la saisie (sans toucher aux données intégrées).">Réinitialiser</button>
+  </section>
+
+
   <section>
     <div class="tabs" id="categoryTabs"></div>
 
@@ -410,19 +423,7 @@
         </div>
       </div>
 
-      
-      <div class="export-bar" style="margin-bottom:.75rem;">
-        <div class="list-title">SAISIE</div>
-        <div class="export-actions">
-          <button class="btn" id="exportSaisieCsvBtn" type="button">Exporter saisie (.csv)</button>
-          <label class="btn secondary" style="cursor:pointer;">
-            Importer saisie (.csv)
-            <input id="importSaisieCsvInput" type="file" accept=".csv,text/csv" style="display:none;">
-          </label>
-        </div>
-      </div>
-
-<div class="lists-grid">
+      <div class="lists-grid">
         <div class="list-box">
           <div class="export-bar">
             <div class="list-title">METRO</div>
@@ -463,6 +464,190 @@
   let activeCategory = null;
   let state = {};
   let CUSTOM_ITEMS = [];
+
+  // =========================
+  // Sauvegarde / Reprise (JSON)
+  // =========================
+  const SESSION_STORAGE_KEY = "COXX_STOCK_SESSION_V1";
+
+  let __dirty = false;
+  let __autosaveTimer = null;
+
+  function setSessionStatus(msg) {
+    const el = document.getElementById("sessionStatus");
+    if (el) el.textContent = msg;
+  }
+
+  function safeSetStatus(msg) {
+    const b = document.getElementById("statusBadge");
+    if (b) b.textContent = msg;
+  }
+
+  function defaultStateForProduct(p) {
+    let effPack = p.units_per_colis || 1;
+    const unitTypeRaw0 = (p.cond_unitaire_lib || "").toLowerCase();
+    const lotLabelRaw0 = (p.cond_lot_lib || "").toLowerCase();
+    if (effPack === 1 && lotLabelRaw0.includes("carton") && unitTypeRaw0.includes("bouteille")) effPack = 6;
+    return {
+      countMode: effPack > 1 ? "colis" : "unite",
+      stockCount: 0,
+      orderUnitsOverride: null,
+      orderLotsOverride: null,
+      include: true,
+      brasseur: false,
+    };
+  }
+
+  function buildSessionPayload() {
+    const week = parseInt(document.getElementById("weekSelect")?.value || "1", 10);
+    const search = (document.getElementById("searchInput")?.value || "");
+    return {
+      schema: "COXX_STOCK_SESSION",
+      version: 1,
+      savedAt: new Date().toISOString(),
+      week,
+      activeCategory: activeCategory || null,
+      search,
+      state,
+      customItems: CUSTOM_ITEMS,
+    };
+  }
+
+  function applySessionPayload(payload, { silent = false } = {}) {
+    if (!payload || payload.schema !== "COXX_STOCK_SESSION") {
+      throw new Error("Fichier non reconnu (schema).");
+    }
+    if (payload.version !== 1) {
+      throw new Error("Version de fichier non supportée.");
+    }
+
+    // Assure un state complet (tous les produits)
+    const nextState = {};
+    PRODUCTS.forEach(p => {
+      nextState[p.idx] = defaultStateForProduct(p);
+    });
+
+    // Merge des valeurs sauvegardées (uniquement si le produit existe encore)
+    const savedState = payload.state || {};
+    Object.keys(savedState).forEach(k => {
+      if (!nextState[k]) return;
+      const s = savedState[k] || {};
+      nextState[k] = {
+        ...nextState[k],
+        countMode: (s.countMode === "unite" || s.countMode === "colis") ? s.countMode : nextState[k].countMode,
+        stockCount: Number.isFinite(Number(s.stockCount)) ? Number(s.stockCount) : nextState[k].stockCount,
+        orderUnitsOverride: (s.orderUnitsOverride == null) ? null : Math.max(0, Math.ceil(Number(s.orderUnitsOverride) || 0)),
+        orderLotsOverride: (s.orderLotsOverride == null) ? null : Math.max(0, Math.ceil(Number(s.orderLotsOverride) || 0)),
+        include: (s.include === false) ? false : true,
+        brasseur: !!s.brasseur,
+      };
+    });
+
+    state = nextState;
+
+    CUSTOM_ITEMS = Array.isArray(payload.customItems) ? payload.customItems : [];
+
+    const week = payload.week != null ? String(payload.week) : "1";
+    const weekSelect = document.getElementById("weekSelect");
+    if (weekSelect) weekSelect.value = week;
+
+    const searchInput = document.getElementById("searchInput");
+    if (searchInput) searchInput.value = payload.search || "";
+
+    // Catégorie active (si elle existe encore)
+    const wantedCat = payload.activeCategory || null;
+    activeCategory = wantedCat;
+
+    buildCategoryTabs();
+    if (wantedCat && !Array.from(document.querySelectorAll("#categoryTabs .tab-btn")).some(b => b.textContent === wantedCat)) {
+      // Si la catégorie n'existe plus, buildCategoryTabs() choisit la 1ère dispo
+      activeCategory = activeCategory || null;
+      buildCategoryTabs();
+    }
+
+    renderTable();
+    updatePanelSubtitle();
+    renderCustomItems();
+    try { refreshListsUI(); } catch (e) {}
+
+    if (!silent) {
+      setSessionStatus(`Saisie chargée (semaine ${week}).`);
+      safeSetStatus("Saisie importée");
+    }
+  }
+
+  function saveSessionToLocalStorage() {
+    try {
+      const payload = buildSessionPayload();
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
+      setSessionStatus(`Auto-sauvegardé (semaine ${payload.week}).`);
+      __dirty = false;
+    } catch (e) {
+      // localStorage peut être bloqué (mode privé, etc.)
+    }
+  }
+
+  function tryLoadSessionFromLocalStorage() {
+    try {
+      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return false;
+      const payload = JSON.parse(raw);
+      applySessionPayload(payload, { silent: true });
+      setSessionStatus(`Reprise auto (semaine ${payload.week}).`);
+      safeSetStatus("Reprise auto");
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function downloadJson(filename, obj) {
+    const txt = JSON.stringify(obj, null, 2);
+    const blob = new Blob([txt], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function resetSession({ keepWeek = true } = {}) {
+    const weekVal = document.getElementById("weekSelect")?.value || "1";
+    state = {};
+    PRODUCTS.forEach(p => { state[p.idx] = defaultStateForProduct(p); });
+    CUSTOM_ITEMS = [];
+    if (!keepWeek) {
+      const weekSelect = document.getElementById("weekSelect");
+      if (weekSelect) weekSelect.value = "1";
+    } else {
+      const weekSelect = document.getElementById("weekSelect");
+      if (weekSelect) weekSelect.value = weekVal;
+    }
+    renderTable();
+    updatePanelSubtitle();
+    renderCustomItems();
+    try { refreshListsUI(); } catch (e) {}
+    try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
+    setSessionStatus("Saisie réinitialisée.");
+    safeSetStatus("Réinitialisé");
+  }
+
+  function armAutosave() {
+    if (__autosaveTimer) return;
+    __autosaveTimer = setInterval(() => {
+      if (__dirty) saveSessionToLocalStorage();
+    }, 1200);
+  }
+
+  function markDirty() {
+    __dirty = true;
+    armAutosave();
+  }
+
+
 
   function fmtNum(v, d = 2) {
     if (v == null || isNaN(v)) return "";
@@ -1103,168 +1288,74 @@ document.getElementById("addCustomBtn").addEventListener("click", () => {
     renderCustomItems();
   });
 
-  
-  // ===== Export / Import de la SAISIE (CSV ré-importable) =====
-  function _encodeBase64Unicode(str) {
-    // btoa supporte ASCII seulement -> conversion UTF-8
-    return btoa(unescape(encodeURIComponent(str)));
-  }
-  function _decodeBase64Unicode(b64) {
-    return decodeURIComponent(escape(atob(b64)));
-  }
-  function _isSafari() {
-    var ua = navigator.userAgent;
-    return /safari/i.test(ua) && !/chrome|chromium|crios|fxios|edgios|android/i.test(ua);
-  }
+  window.addEventListener("load", () => {
+    // Init "vide"
+    state = {};
+    PRODUCTS.forEach(p => { state[p.idx] = defaultStateForProduct(p); });
+    CUSTOM_ITEMS = [];
 
-  function exportSaisieCsv() {
-    try {
-      var payload = {
-        v: 1,
-        savedAt: new Date().toISOString(),
-        week: (document.getElementById("weekSelect") && document.getElementById("weekSelect").value) ? document.getElementById("weekSelect").value : "1",
-        activeCategory: (typeof activeCategory !== "undefined") ? activeCategory : null,
-        search: (document.getElementById("searchInput") && typeof document.getElementById("searchInput").value === "string") ? document.getElementById("searchInput").value : "",
-        state: state,
-        customItems: CUSTOM_ITEMS
-      };
-
-      var json = JSON.stringify(payload);
-      var b64 = _encodeBase64Unicode(json);
-
-      // CSV "technique" : 1 ligne = 1 sauvegarde
-      var header = "type,version,savedAt,payload_b64\n";
-      var row = ["SAISIE", String(payload.v), payload.savedAt, b64].join(",") + "\n";
-      var csv = header + row;
-
-      var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-
-      // IE/Edge legacy
-      if (navigator.msSaveOrOpenBlob) {
-        navigator.msSaveOrOpenBlob(blob, "COXX_saisie.csv");
-        return;
-      }
-
-      var url = URL.createObjectURL(blob);
-
-      var a = document.createElement("a");
-      a.href = url;
-      a.download = "COXX_saisie.csv";
-      a.rel = "noopener";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-
-      // Safari : parfois download est ignoré -> on ouvre le blob dans un nouvel onglet
-      if (_isSafari()) {
-        var w = window.open(url, "_blank");
-        if (!w) {
-          // si pop-up bloqué, on navigue dans l'onglet courant
-          window.location.href = url;
-        }
-      }
-
-      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
-      setStatus("Saisie exportée (CSV)");
-    } catch (e) {
-      alert("Export CSV impossible : " + (e && e.message ? e.message : e));
-    }
-  }
-
-  function importSaisieCsvText(csvText) {
-    var lines = String(csvText || "").split(/\r?\n/).filter(function (l) { return l.trim() !== ""; });
-    if (!lines.length) throw new Error("Fichier vide");
-
-    // ignore header si présent
-    var startIdx = 0;
-    if (lines[0].toLowerCase().indexOf("type,version") === 0) startIdx = 1;
-    if (startIdx >= lines.length) throw new Error("Aucune ligne de données trouvée");
-
-    // on prend la dernière ligne non vide (au cas où)
-    var line = lines[lines.length - 1];
-
-    var parts = line.split(",");
-    if (parts.length < 4) throw new Error("Format CSV invalide");
-    var payloadB64 = parts.slice(3).join(","); // au cas où
-    var json = _decodeBase64Unicode(payloadB64);
-    var payload = JSON.parse(json);
-
-    if (!payload || !payload.state) throw new Error("Payload invalide (state manquant)");
-
-    state = payload.state;
-    CUSTOM_ITEMS = Array.isArray(payload.customItems) ? payload.customItems : [];
-
-    // Restaurer semaine / filtre / catégorie si dispo
-    if (payload.week && document.getElementById("weekSelect")) {
-      document.getElementById("weekSelect").value = String(payload.week);
-    }
-    if (typeof payload.search === "string" && document.getElementById("searchInput")) {
-      document.getElementById("searchInput").value = payload.search;
-    }
-    if (payload.activeCategory && typeof payload.activeCategory === "string") {
-      activeCategory = payload.activeCategory;
-    }
-
-    buildCategoryTabs();
-    renderTable();
-    updatePanelSubtitle();
-    renderCustomItems();
-    setStatus("Saisie importée (CSV)");
-  }
-
-  function importSaisieCsvFile(file) {
-    return new Promise(function (resolve, reject) {
-      var reader = new FileReader();
-      reader.onload = function () {
-        try {
-          importSaisieCsvText(String(reader.result || ""));
-          resolve();
-        } catch (e) {
-          reject(e);
-        }
-      };
-      reader.onerror = function () {
-        reject(new Error("Lecture du fichier impossible"));
-      };
-      reader.readAsText(file);
-    });
-  }
-
-window.addEventListener("load", () => {
-    PRODUCTS.forEach(p => {
-      state[p.idx] = {
-        countMode: (p.units_per_colis || 1) > 1 ? "colis" : "unite",
-        stockCount: 0,
-        orderUnitsOverride: null,
-          orderLotsOverride: null,
-        include: true,
-        brasseur: false,
-      };
-    });
     buildWeekOptions();
     buildCategoryTabs();
+
+    // Reprise auto si une sauvegarde existe (localStorage)
+    tryLoadSessionFromLocalStorage();
+
     renderTable();
     updatePanelSubtitle();
     renderCustomItems();
-    
-    // Brancher export/import de saisie (CSV)
-    var exportBtn = document.getElementById("exportSaisieCsvBtn");
-    if (exportBtn) exportBtn.addEventListener("click", function (ev) { ev.preventDefault(); exportSaisieCsv(); });
+    try { refreshListsUI(); } catch (e) {}
 
-    var importInput = document.getElementById("importSaisieCsvInput");
-    if (importInput) {
-      importInput.addEventListener("change", function (e) {
-        var f = e && e.target && e.target.files && e.target.files[0] ? e.target.files[0] : null;
-        if (!f) return;
-        importSaisieCsvFile(f).catch(function (err) {
-          alert("Import CSV impossible : " + (err && err.message ? err.message : err));
-        });
-        // permet de re-sélectionner le même fichier
-        e.target.value = "";
-      });
-    }
+    // Boutons export / import / reset
+    document.getElementById("exportSessionBtn")?.addEventListener("click", () => {
+      const payload = buildSessionPayload();
+      const safeWeek = payload.week || 1;
+      downloadJson(`COXX_saisie_semaine_${safeWeek}.json`, payload);
+      setSessionStatus(`Exporté (semaine ${safeWeek}).`);
+      safeSetStatus("Exporté");
+    });
 
-setStatus("Prêt à l'utilisation");
+    document.getElementById("importSessionInput")?.addEventListener("change", (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const payload = JSON.parse(String(reader.result || ""));
+          applySessionPayload(payload);
+          // On persiste aussi pour la reprise auto
+          try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(buildSessionPayload())); } catch (e) {}
+        } catch (e) {
+          setSessionStatus(`Erreur import : ${e.message || e}`);
+          safeSetStatus("Erreur import");
+        } finally {
+          ev.target.value = "";
+        }
+      };
+      reader.readAsText(file, "utf-8");
+    });
+
+    document.getElementById("clearSessionBtn")?.addEventListener("click", () => {
+      resetSession({ keepWeek: true });
+    });
+
+    // Marque la saisie comme "modifiée" -> autosauvegarde locale
+    document.addEventListener("change", (e) => {
+      const t = e.target;
+      if (!t) return;
+      if (t.id === "importSessionInput") return;
+      // Toute modification utilisateur sur les champs
+      if (t.matches("input, select, textarea")) markDirty();
+    }, true);
+
+    document.addEventListener("click", (e) => {
+      const t = e.target;
+      if (!t) return;
+      if (t.classList && t.classList.contains("stepper-btn")) markDirty();
+      if (t.id === "addCustomBtn") markDirty();
+    }, true);
+
+    safeSetStatus("Prêt");
+    setSessionStatus("Prêt. Pense à exporter la saisie si tu veux la transférer sur un autre PC.");
   });
 </script>
 
