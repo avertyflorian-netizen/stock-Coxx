@@ -410,7 +410,19 @@
         </div>
       </div>
 
-      <div class="lists-grid">
+      
+      <div class="export-bar" style="margin-bottom:.75rem;">
+        <div class="list-title">SAISIE</div>
+        <div class="export-actions">
+          <button class="btn" id="exportSaisieCsvBtn" type="button">Exporter saisie (.csv)</button>
+          <label class="btn secondary" style="cursor:pointer;">
+            Importer saisie (.csv)
+            <input id="importSaisieCsvInput" type="file" accept=".csv,text/csv" style="display:none;">
+          </label>
+        </div>
+      </div>
+
+<div class="lists-grid">
         <div class="list-box">
           <div class="export-bar">
             <div class="list-title">METRO</div>
@@ -434,17 +446,7 @@
         </div>
       </div>
 
-      
-      <div class="export-bar" style="justify-content:flex-end; margin-top:.6rem;">
-        <div class="export-actions">
-          <button class="btn secondary" type="button" id="exportStateJsonBtn">Exporter la saisie (.json)</button>
-          <label class="btn secondary" style="cursor:pointer;">
-            Importer une saisie (.json)
-            <input type="file" id="importStateJsonInput" accept="application/json" style="display:none;">
-          </label>
-        </div>
-      </div>
-<div class="hint" style="margin-top:.5rem;">Chaque ligne : libellé Coxx, quantité (unités), conditionnement.</div>
+      <div class="hint" style="margin-top:.5rem;">Chaque ligne : libellé Coxx, quantité (unités), conditionnement.</div>
     </div>
 
     </div>
@@ -461,142 +463,6 @@
   let activeCategory = null;
   let state = {};
   let CUSTOM_ITEMS = [];
-
-  // ===== Export / Import de la saisie (pour changer de poste / navigateur) =====
-  const STATE_EXPORT_VERSION = 1;
-
-  function ensureStateDefaults() {
-    PRODUCTS.forEach(p => {
-      if (!state[p.idx]) {
-        state[p.idx] = {
-          countMode: (p.units_per_colis || 1) > 1 ? "colis" : "unite",
-          stockCount: 0,
-          orderUnitsOverride: null,
-          orderLotsOverride: null,
-          include: true,
-          brasseur: false,
-        };
-      }
-    });
-  }
-
-  function buildSnapshot() {
-    const weekEl = document.getElementById("weekSelect");
-    const searchEl = document.getElementById("searchInput");
-    return {
-      v: STATE_EXPORT_VERSION,
-      savedAt: new Date().toISOString(),
-      week: weekEl ? weekEl.value : "1",
-      activeCategory: activeCategory,
-      search: searchEl ? searchEl.value : "",
-      state: state,
-      customItems: CUSTOM_ITEMS
-    };
-  }
-
-  function downloadJson(filename, obj) {
-    const jsonText = JSON.stringify(obj, null, 2);
-    const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.rel = "noopener";
-    a.style.display = "none";
-    document.body.appendChild(a);
-
-    const ua = String(navigator.userAgent || "");
-    const isSafari = /safari/i.test(ua) && !/chrome|crios|android/i.test(ua);
-
-    // 1) Tentative download standard
-    try { a.click(); } catch (e) {}
-
-    // 2) Fallback Safari: ouvrir le JSON dans un nouvel onglet (l'utilisateur peut ensuite "Enregistrer sous…")
-    if (isSafari) {
-      setTimeout(function () {
-        try {
-          const w = window.open(url, "_blank");
-          if (!w) { window.location.href = url; }
-        } catch (e) {
-          window.location.href = url;
-        }
-      }, 150);
-    }
-
-    // Nettoyage (on laisse le temps à Safari d'ouvrir l'onglet)
-    setTimeout(function () {
-      try { URL.revokeObjectURL(url); } catch (e) {}
-      try { document.body.removeChild(a); } catch (e) {}
-    }, 60000);
-  }
-  function exportStateJson() {
-    try {
-      downloadJson("COXX_saisie.json", buildSnapshot());
-      setStatus("Export JSON prêt (téléchargement lancé).");
-    } catch (e) {
-      alert("Export impossible : " + (e && e.message ? e.message : e));
-    }
-  }
-
-  function applySnapshot(payload) {
-    if (!payload || !payload.state) throw new Error("Fichier invalide : champ 'state' manquant");
-
-    state = payload.state;
-    CUSTOM_ITEMS = Array.isArray(payload.customItems) ? payload.customItems : [];
-
-    // remet semaine / filtre / onglet si fournis
-    const weekEl = document.getElementById("weekSelect");
-    if (weekEl && payload.week != null) weekEl.value = String(payload.week);
-
-    const searchEl = document.getElementById("searchInput");
-    if (searchEl && typeof payload.search === "string") searchEl.value = payload.search;
-
-    if (payload.activeCategory != null) activeCategory = payload.activeCategory;
-
-    // si la base produits a changé depuis l'export, on complète les nouveaux items
-    ensureStateDefaults();
-
-    buildCategoryTabs();
-    renderTable();
-    updatePanelSubtitle();
-    renderCustomItems();
-    setStatus("Saisie importée.");
-  }
-
-  function importStateJsonFile(file) {
-    const reader = new FileReader();
-    reader.onload = function () {
-      try {
-        const payload = JSON.parse(String(reader.result || "{}"));
-        applySnapshot(payload);
-      } catch (e) {
-        alert("Import impossible : " + (e && e.message ? e.message : e));
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  function initStateExportImportUI() {
-    const exportBtn = document.getElementById("exportStateJsonBtn");
-    if (exportBtn) {
-      exportBtn.addEventListener("click", function (ev) {
-        ev.preventDefault();
-        exportStateJson();
-      });
-    }
-
-    const importInput = document.getElementById("importStateJsonInput");
-    if (importInput) {
-      importInput.addEventListener("change", function (ev) {
-        const files = ev.target.files;
-        const file = files && files[0] ? files[0] : null;
-        if (file) importStateJsonFile(file);
-        // permet de réimporter le même fichier ensuite
-        ev.target.value = "";
-      });
-    }
-  }
 
   function fmtNum(v, d = 2) {
     if (v == null || isNaN(v)) return "";
@@ -1237,19 +1103,168 @@ document.getElementById("addCustomBtn").addEventListener("click", () => {
     renderCustomItems();
   });
 
-  window.addEventListener("load", () => {
-    // Initialise les valeurs par défaut (sans écraser une saisie importée ensuite)
-    ensureStateDefaults();
+  
+  // ===== Export / Import de la SAISIE (CSV ré-importable) =====
+  function _encodeBase64Unicode(str) {
+    // btoa supporte ASCII seulement -> conversion UTF-8
+    return btoa(unescape(encodeURIComponent(str)));
+  }
+  function _decodeBase64Unicode(b64) {
+    return decodeURIComponent(escape(atob(b64)));
+  }
+  function _isSafari() {
+    var ua = navigator.userAgent;
+    return /safari/i.test(ua) && !/chrome|chromium|crios|fxios|edgios|android/i.test(ua);
+  }
 
+  function exportSaisieCsv() {
+    try {
+      var payload = {
+        v: 1,
+        savedAt: new Date().toISOString(),
+        week: (document.getElementById("weekSelect") && document.getElementById("weekSelect").value) ? document.getElementById("weekSelect").value : "1",
+        activeCategory: (typeof activeCategory !== "undefined") ? activeCategory : null,
+        search: (document.getElementById("searchInput") && typeof document.getElementById("searchInput").value === "string") ? document.getElementById("searchInput").value : "",
+        state: state,
+        customItems: CUSTOM_ITEMS
+      };
+
+      var json = JSON.stringify(payload);
+      var b64 = _encodeBase64Unicode(json);
+
+      // CSV "technique" : 1 ligne = 1 sauvegarde
+      var header = "type,version,savedAt,payload_b64\n";
+      var row = ["SAISIE", String(payload.v), payload.savedAt, b64].join(",") + "\n";
+      var csv = header + row;
+
+      var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+
+      // IE/Edge legacy
+      if (navigator.msSaveOrOpenBlob) {
+        navigator.msSaveOrOpenBlob(blob, "COXX_saisie.csv");
+        return;
+      }
+
+      var url = URL.createObjectURL(blob);
+
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "COXX_saisie.csv";
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Safari : parfois download est ignoré -> on ouvre le blob dans un nouvel onglet
+      if (_isSafari()) {
+        var w = window.open(url, "_blank");
+        if (!w) {
+          // si pop-up bloqué, on navigue dans l'onglet courant
+          window.location.href = url;
+        }
+      }
+
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      setStatus("Saisie exportée (CSV)");
+    } catch (e) {
+      alert("Export CSV impossible : " + (e && e.message ? e.message : e));
+    }
+  }
+
+  function importSaisieCsvText(csvText) {
+    var lines = String(csvText || "").split(/\r?\n/).filter(function (l) { return l.trim() !== ""; });
+    if (!lines.length) throw new Error("Fichier vide");
+
+    // ignore header si présent
+    var startIdx = 0;
+    if (lines[0].toLowerCase().indexOf("type,version") === 0) startIdx = 1;
+    if (startIdx >= lines.length) throw new Error("Aucune ligne de données trouvée");
+
+    // on prend la dernière ligne non vide (au cas où)
+    var line = lines[lines.length - 1];
+
+    var parts = line.split(",");
+    if (parts.length < 4) throw new Error("Format CSV invalide");
+    var payloadB64 = parts.slice(3).join(","); // au cas où
+    var json = _decodeBase64Unicode(payloadB64);
+    var payload = JSON.parse(json);
+
+    if (!payload || !payload.state) throw new Error("Payload invalide (state manquant)");
+
+    state = payload.state;
+    CUSTOM_ITEMS = Array.isArray(payload.customItems) ? payload.customItems : [];
+
+    // Restaurer semaine / filtre / catégorie si dispo
+    if (payload.week && document.getElementById("weekSelect")) {
+      document.getElementById("weekSelect").value = String(payload.week);
+    }
+    if (typeof payload.search === "string" && document.getElementById("searchInput")) {
+      document.getElementById("searchInput").value = payload.search;
+    }
+    if (payload.activeCategory && typeof payload.activeCategory === "string") {
+      activeCategory = payload.activeCategory;
+    }
+
+    buildCategoryTabs();
+    renderTable();
+    updatePanelSubtitle();
+    renderCustomItems();
+    setStatus("Saisie importée (CSV)");
+  }
+
+  function importSaisieCsvFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        try {
+          importSaisieCsvText(String(reader.result || ""));
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      };
+      reader.onerror = function () {
+        reject(new Error("Lecture du fichier impossible"));
+      };
+      reader.readAsText(file);
+    });
+  }
+
+window.addEventListener("load", () => {
+    PRODUCTS.forEach(p => {
+      state[p.idx] = {
+        countMode: (p.units_per_colis || 1) > 1 ? "colis" : "unite",
+        stockCount: 0,
+        orderUnitsOverride: null,
+          orderLotsOverride: null,
+        include: true,
+        brasseur: false,
+      };
+    });
     buildWeekOptions();
     buildCategoryTabs();
     renderTable();
     updatePanelSubtitle();
     renderCustomItems();
+    
+    // Brancher export/import de saisie (CSV)
+    var exportBtn = document.getElementById("exportSaisieCsvBtn");
+    if (exportBtn) exportBtn.addEventListener("click", function (ev) { ev.preventDefault(); exportSaisieCsv(); });
 
-    initStateExportImportUI();
+    var importInput = document.getElementById("importSaisieCsvInput");
+    if (importInput) {
+      importInput.addEventListener("change", function (e) {
+        var f = e && e.target && e.target.files && e.target.files[0] ? e.target.files[0] : null;
+        if (!f) return;
+        importSaisieCsvFile(f).catch(function (err) {
+          alert("Import CSV impossible : " + (err && err.message ? err.message : err));
+        });
+        // permet de re-sélectionner le même fichier
+        e.target.value = "";
+      });
+    }
 
-    setStatus("Prêt à l'utilisation");
+setStatus("Prêt à l'utilisation");
   });
 </script>
 
